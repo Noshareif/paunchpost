@@ -1,0 +1,18 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "UploadAndDeleteEmailImages",
+      "Effect": "Allow",
+      "Action": ["s3:PutObject", "s3:DeleteObject"],
+      "Resource": "arn:aws:s3:::paunchpost-images/email/*"
+    },
+    {
+      "Sid": "ListEmailImages",
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::paunchpost-images",
+      "Condition": { "StringLike": { "s3:prefix": ["email/*"] } }
+    }
+  ]
+}
