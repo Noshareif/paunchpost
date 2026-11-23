@@ -12,7 +12,7 @@ let ses: SESv2Client | null = null;
 function client() {
   if (!ses) {
     ses = new SESv2Client({
-      region: process.env.SES_REGION || process.env.AWS_REGION || "us-east-2",
+      region: process.env.SES_REGION || "us-east-2",
       ...(process.env.SES_ENDPOINT ? { endpoint: process.env.SES_ENDPOINT } : {}),
     });
   }
