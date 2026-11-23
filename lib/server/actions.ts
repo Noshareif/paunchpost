@@ -19,7 +19,7 @@ const num = (v: unknown) => {
 };
 
 /* ---------------- settings ---------------- */
-const SETTING_KEYS = ["company", "footer_address", "default_reminder", "track_opens", "track_clicks", "require_permission"] as const;
+const SETTING_KEYS = ["company", "footer_address", "default_reminder", "track_opens", "track_clicks", "require_permission", "custom_fields"] as const;
 
 async function settings() {
   const rows = await sql()`select key, value from settings`;
@@ -31,6 +31,7 @@ async function settings() {
     trackOpens: m.track_opens ?? true,
     trackClicks: m.track_clicks ?? true,
     requirePermission: m.require_permission ?? true,
+    fields: Array.isArray(m.custom_fields) ? m.custom_fields : [],
   };
 }
 
@@ -183,6 +184,15 @@ async function updateCampaign({ id, patch }: Row) {
     if (!col) continue;
     set[col] = k === "audience" ? s.json(((v as object) || {}) as any) : v;
   }
+  if (patch && "sendAt" in patch) {
+    // Drafts keep a planned date for the calendar; scheduled campaigns can be moved to a new time.
+    const v = patch.sendAt ? new Date(patch.sendAt) : null;
+    if (v && isNaN(+v)) fail("That date doesn’t look right.");
+    if (c.status === "scheduled") {
+      if (!v || +v < Date.now() + 60_000) fail("Pick a time at least a minute from now.");
+    }
+    set.send_at = v;
+  }
   if (!Object.keys(set).length) return { ok: true };
   await s`update campaigns set ${s(set)}, updated_at = now() where id = ${cid}`;
   return { ok: true };
@@ -310,7 +320,7 @@ async function deleteList({ id }: Row) {
   const s = sql();
   // Keep the audience's name on campaigns that used it, then drop it from drafts.
   await s`update campaigns set audience = jsonb_set(audience, '{listIds}', coalesce((select jsonb_agg(x) from jsonb_array_elements(audience->'listIds') x where x::int <> ${lid}), '[]'))
-          where audience ? 'listIds'`;
+          where audience ? 'listIds' and status in ('draft','scheduled')`;
   await s`delete from lists where id = ${lid}`;
   return { ok: true };
 }
@@ -615,7 +625,7 @@ async function deleteSender({ id }: Row) {
 
 /* ---------------- settings, images ---------------- */
 async function saveSettings({ patch }: Row) {
-  const map: Row = { company: "company", footerAddress: "footer_address", reminder: "default_reminder", trackOpens: "track_opens", trackClicks: "track_clicks", requirePermission: "require_permission" };
+  const map: Row = { company: "company", footerAddress: "footer_address", reminder: "default_reminder", trackOpens: "track_opens", trackClicks: "track_clicks", requirePermission: "require_permission", fields: "custom_fields" };
   for (const [k, v] of Object.entries(patch || {})) {
     const key = map[k];
     if (!key || !(SETTING_KEYS as readonly string[]).includes(key)) continue;

@@ -3,7 +3,7 @@ import type { NextRequest } from "next/server";
 
 // Temporary sign-in until Microsoft 365 login is added: the browser asks for a
 // username and password (APP_USER / APP_PASSWORD in Vercel). Without this, anyone
-// who found the site could upload images to your AWS storage.
+// who found the site could read your contacts or send email as Darkhorse Tech.
 
 function safeEqual(a: string, b: string): boolean {
   if (a.length !== b.length) return false;
