@@ -1300,6 +1300,10 @@ function gsDraw(){const q=GS.q;const box=$('#gres');const cs=S.campaigns.filter(
  box.innerHTML=`<div class="search-res">${cs.length+xs.length+ts.length?(cs.length?'<div class="grp">Campaigns</div>'+cs.map(c=>`<a href="#/${c.status==='sent'?'report':'campaign'}/${c.id}" data-act="gsGo">${esc(c.name)} <span class="small muted">· ${c.status}</span></a>`).join(''):'')+(xs.length?'<div class="grp">Contacts</div>'+xs.map(x=>`<a href="#" data-act="gsContact" data-id="${x.id}">${esc(x.email)} <span class="small muted">· ${esc((x.first+' '+x.last).trim()||x.practice)}</span></a>`).join(''):'')+(ts.length?'<div class="grp">Templates</div>'+ts.map(t=>`<a href="#/template/${t.id}" data-act="gsGo">${esc(t.name)}</a>`).join(''):''):`<div class="small muted" style="padding:10px 12px">${GS.cq===q?'Nothing found':'Searching…'}</div>`}</div>`;}
 IN.gsearch=t=>{const q=t.value.trim().toLowerCase();const box=$('#gres');if(q.length<2){box.innerHTML='';GS.q='';return;}GS.q=q;gsDraw();gsFetch(q);};
 
+/* ---- merge tags in previews: same rules as the sender (fallbacks, unknown tags dropped) ---- */
+function merge(html,x){x=x||sampleContact();const map={email:x.email,first_name:x.first,last_name:x.last,practice:x.practice,title:x.title||'',phone:x.phone||'',...(x.custom||{})};const links={unsubscribe_url:'#unsubscribe',view_in_browser_url:'#view-in-browser'};
+ return String(html).replace(/\{\{\s*([a-z0-9_]+)\s*(?:\|\s*([^}]*?)\s*)?\}\}/gi,(m,key,fb)=>{const k=key.toLowerCase();if(k in links)return links[k];if(k in map)return esc(map[k]||fb||'');return fb!=null?esc(fb):(S.fields.some(f=>f.tag===k)?'':m);});}
+
 /* ================= global search ================= */
 IN.gsearch=t=>{const q=t.value.trim().toLowerCase();const box=$('#gres');if(q.length<2){box.innerHTML='';return;}
  const cs=S.campaigns.filter(c=>(c.name+' '+c.subject).toLowerCase().includes(q)).slice(0,5);const xs=S.contacts.filter(x=>(x.email+' '+x.first+' '+x.last+' '+x.practice).toLowerCase().includes(q)).slice(0,5);const ts=S.templates.filter(x=>x.name.toLowerCase().includes(q)).slice(0,3);
