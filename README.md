@@ -28,8 +28,8 @@ The interface comes next: the screens from the prototype, wired to these pieces.
 3. **Tables and Mailchimp history:** on your computer, put `DATABASE_URL` in `.env.local`, then:
    ```bash
    npm install
-   npx dotenv -e .env.local -- npm run db:migrate
-   npx dotenv -e .env.local -- npm run import:mailchimp
+   node --env-file=.env.local scripts/migrate.mjs
+   node --env-file=.env.local scripts/import-mailchimp.mjs
    ```
 4. **Scheduled sends:** Vercel's free plan only runs cron jobs once a day. Use a free scheduler such as cron-job.org to call `https://paunchpost.vercel.app/api/cron` every 5 minutes, with the header `Authorization: Bearer <CRON_SECRET>`.
 5. **Amazon SES** (in US East (Ohio)):
