@@ -25,7 +25,7 @@ const TEXT_FIELDS: Record<string, string> = {
 };
 
 /** One segment condition as a SQL fragment about contact `c`. Unknown conditions match nobody. */
-function condSql(k: Cond): Frag {
+export function condSql(k: Cond): Frag {
   const sql = db();
   const v = String(k.v ?? "");
   if (TEXT_FIELDS[k.f]) {
@@ -66,7 +66,7 @@ function condSql(k: Cond): Frag {
   return sql`false`;
 }
 
-function joinAll(frags: Frag[], op: "and" | "or"): Frag {
+export function joinAll(frags: Frag[], op: "and" | "or"): Frag {
   const sql = db();
   if (!frags.length) return op === "and" ? sql`true` : sql`false`;
   return frags.slice(1).reduce<Frag>((acc, f) => (op === "and" ? sql`${acc} and (${f})` : sql`${acc} or (${f})`), sql`(${frags[0]})`);
