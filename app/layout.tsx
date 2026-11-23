@@ -21,15 +21,15 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
               </div>
             </div>
             <nav className="nav">
-              <Link href="/content" className="on">
-                <span className="ico">▣</span>Content library
+              <Link href="/status" className="on">
+                <span className="ico">⌂</span>Status
               </Link>
               <div className="nav-label">Coming next</div>
               <a className="off">Campaigns</a>
               <a className="off">Audience</a>
               <a className="off">Analytics</a>
             </nav>
-            <div className="side-foot">Images stored in Amazon S3</div>
+            <div className="side-foot">Sends through Amazon SES</div>
           </aside>
           <main className="main">{children}</main>
         </div>

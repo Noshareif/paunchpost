@@ -1,8 +1,0 @@
-[
-  {
-    "AllowedOrigins": ["https://YOUR-PROJECT.vercel.app", "http://localhost:3000"],
-    "AllowedMethods": ["POST"],
-    "AllowedHeaders": ["*"],
-    "MaxAgeSeconds": 3000
-  }
-]
