@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import { handleSesEvent } from "@/lib/server/ses-events";
+import { secret } from "@/lib/server/secrets";
 
 export const dynamic = "force-dynamic";
 
@@ -36,7 +37,8 @@ async function verifySns(m: Record<string, string>): Promise<boolean> {
 export async function POST(req: Request) {
   // Extra shared secret in the subscription URL: /api/ses/events?key=...
   const key = new URL(req.url).searchParams.get("key");
-  if (!process.env.SES_WEBHOOK_KEY || key !== process.env.SES_WEBHOOK_KEY) return new Response("Forbidden", { status: 403 });
+  const expected = secret("SES_WEBHOOK_KEY");
+  if (!expected || key !== expected) return new Response("Forbidden", { status: 403 });
 
   let m: Record<string, string>;
   try {

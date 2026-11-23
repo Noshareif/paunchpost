@@ -1,8 +1,9 @@
 import { after } from "next/server";
 import { baseUrl, processBatch, startDueCampaigns } from "./send";
+import { secret as getSecret } from "./secrets";
 
 export function authorized(req: Request): boolean {
-  const secret = process.env.CRON_SECRET;
+  const secret = getSecret("CRON_SECRET");
   if (!secret) return false;
   const h = req.headers.get("authorization") || "";
   return h === `Bearer ${secret}`;
@@ -10,7 +11,7 @@ export function authorized(req: Request): boolean {
 
 /** Asks the app to run another batch right after this response (keeps a big send moving). */
 export function kickWorker() {
-  const secret = process.env.CRON_SECRET;
+  const secret = getSecret("CRON_SECRET");
   if (!secret) return;
   after(async () => {
     try {
