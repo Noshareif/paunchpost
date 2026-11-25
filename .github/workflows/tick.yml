@@ -1,0 +1,13 @@
+name: PaunchPost heartbeat
+# Wakes PaunchPost every 5 minutes so scheduled campaigns go out on time and big sends keep moving.
+# The endpoint needs no secret: it only starts work that was already scheduled or queued.
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - run: curl -fsS --max-time 60 https://email.darkhorsetech.com/api/tick

@@ -37,5 +37,5 @@ export const config = {
   // Everything except: Next.js build files, the logo, and the public endpoints email recipients
   // and Amazon need (/o open pixel, /r click redirects, /u unsubscribe, /v view in browser,
   // /api/ses Amazon's bounce feed, /api/cron and /api/worker which check their own secret).
-  matcher: ["/((?!_next/static|_next/image|paunchpost-cat.jpg|paunchpost-logo|favicon.ico|o/|r/|u/|v/|api/ses/|api/cron|api/worker).*)"],
+  matcher: ["/((?!_next/static|_next/image|paunchpost-cat.jpg|paunchpost-logo|favicon.ico|o/|r/|u/|v/|api/ses/|api/cron|api/worker|api/tick).*)"],
 };
