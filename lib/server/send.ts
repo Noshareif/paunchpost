@@ -19,7 +19,16 @@ function client() {
   return ses;
 }
 
-const RATE = Number(process.env.SES_RATE_PER_SECOND || 12); // stay under SES's 14/second limit
+// Speed is a setting (default 5/second): slower sends give bounce reports time to arrive,
+// so the safety checks below can pause a bad send early. Never above SES's 14/second limit.
+async function sendRate() {
+  const env = Number(process.env.SES_RATE_PER_SECOND);
+  const v = env > 0 ? env : Number(await getSetting("send_rate", 5));
+  return Math.min(13, Math.max(1, v || 5));
+}
+async function configSet() {
+  return process.env.SES_CONFIGURATION_SET || String(await getSetting("ses_config_set", "")) || undefined;
+}
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 type Shared = { company: string; footerAddress: string; defaultReminder: string };
@@ -36,7 +45,7 @@ function fromLine(s: { name: string; email: string }) {
   return `"${s.name.replace(/"/g, "'")}" <${s.email}>`;
 }
 
-async function sesSend(opts: { from: string; replyTo?: string | null; to: string; subject: string; html: string; text: string; unsub?: string }) {
+async function sesSend(opts: { from: string; replyTo?: string | null; to: string; subject: string; html: string; text: string; unsub?: string; configSet?: string }) {
   const headers = opts.unsub
     ? [
         { Name: "List-Unsubscribe", Value: `<${opts.unsub}>` },
@@ -48,7 +57,7 @@ async function sesSend(opts: { from: string; replyTo?: string | null; to: string
       FromEmailAddress: opts.from,
       ReplyToAddresses: opts.replyTo ? [opts.replyTo] : undefined,
       Destination: { ToAddresses: [opts.to] },
-      ConfigurationSetName: process.env.SES_CONFIGURATION_SET || undefined,
+      ConfigurationSetName: opts.configSet,
       Content: {
         Simple: {
           Subject: { Data: opts.subject, Charset: "UTF-8" },
@@ -75,6 +84,10 @@ export async function readiness(campaignId: number): Promise<string[]> {
   if (!c.sender_email) p.push("Choose who it’s from.");
   const footer = await getSetting("footer_address", "");
   if (!String(footer).trim()) p.push("Add the mailing address for the footer in Settings.");
+  // Never send a campaign until Amazon's bounce & complaint reports reach PaunchPost.
+  if (!process.env.SKIP_FEED_CHECK && !(await getSetting("feed_confirmed_at", ""))) {
+    p.push("Connect the bounce & complaint feed first (Settings → Sending domain), so bad addresses are removed automatically.");
+  }
   return p;
 }
 
@@ -87,6 +100,16 @@ export async function startCampaign(campaignId: number): Promise<{ queued: numbe
     const [c] = await tx`select * from campaigns where id = ${campaignId} for update`;
     if (!["draft", "scheduled"].includes(c.status)) throw new SendError(`It’s already ${c.status}.`);
     const rec = await recipientsSql(c.audience as Audience);
+    // Safety caps (Settings → Sending domain).
+    const [maxCampaign, maxDay] = await Promise.all([getSetting("max_per_campaign", 3000), getSetting("max_per_day", 4000)]);
+    const [{ n: count }] = await tx`select count(*)::int as n from (${rec.q}) r`;
+    if (count > Number(maxCampaign)) {
+      throw new SendError(`This would go to ${count.toLocaleString()} people, over the ${Number(maxCampaign).toLocaleString()}-per-campaign safety limit. Narrow the audience or raise the limit in Settings.`);
+    }
+    const [{ n: today }] = await tx`select count(*)::int as n from sends s join campaigns k on k.id = s.campaign_id where k.started_at > now() - interval '24 hours'`;
+    if (today + count > Number(maxDay)) {
+      throw new SendError(`That would make ${(today + count).toLocaleString()} emails in 24 hours, over the ${Number(maxDay).toLocaleString()}-per-day safety limit. Try again later or raise the limit in Settings.`);
+    }
     const inserted = await tx`
       insert into sends (campaign_id, contact_id, email, token)
       select ${campaignId}, r.id, lower(r.email), replace(gen_random_uuid()::text, '-', '') || replace(gen_random_uuid()::text, '-', '')
@@ -112,11 +135,17 @@ export async function processBatch(opts: { limit?: number; deadlineMs?: number }
   const deadline = Date.now() + (opts.deadlineMs ?? 45_000);
   // Rows a crashed worker left half-done go back in the queue.
   await sql`update sends set status = 'queued', claimed_at = null where status = 'sending' and claimed_at < now() - interval '10 minutes'`;
+  await checkSafety();
   const rows = await sql`
     update sends set status = 'sending', claimed_at = now()
-    where id in (select id from sends where status = 'queued' order by campaign_id, id limit ${limit} for update skip locked)
+    where id in (select s.id from sends s join campaigns c on c.id = s.campaign_id
+                 where s.status = 'queued' and c.paused_reason is null
+                 order by s.campaign_id, s.id limit ${limit} for update of s skip locked)
     returning id, campaign_id, contact_id, email, token`;
-  if (!rows.length) return { sent: 0, failed: 0, remaining: 0 };
+  if (!rows.length) return { sent: 0, failed: 0, remaining: await remaining() };
+  const RATE = await sendRate();
+  const cfg = await configSet();
+  let failStreak = 0;
 
   const sh = await shared();
   const campaigns = new Map<number, any>();
@@ -137,13 +166,20 @@ export async function processBatch(opts: { limit?: number; deadlineMs?: number }
   }
   const suppressed = new Set((await sql`select email from suppressions where email = any(${rows.map(r => r.email)})`).map(r => r.email));
 
-  let sent = 0, failed = 0, i = 0;
+  let sent = 0, failed = 0, i = 0, done = 0;
   const gap = 1000 / RATE;
+  let paused = new Set<number>();
+  const refreshPaused = async () => {
+    await checkSafety();
+    paused = new Set((await sql`select id from campaigns where paused_reason is not null and id = any(${[...campaigns.keys()]})`).map(x => Number(x.id)));
+  };
   const worker = async () => {
     while (i < rows.length) {
       const r = rows[i++];
       const started = Date.now();
-      if (Date.now() > deadline) {
+      // Every 25 emails, look at the bounce/complaint reports that came back and stop if needed.
+      if (++done % 25 === 0) await refreshPaused();
+      if (Date.now() > deadline || paused.has(Number(r.campaign_id))) {
         await sql`update sends set status = 'queued', claimed_at = null where id = ${r.id}`;
         continue;
       }
@@ -173,7 +209,9 @@ export async function processBatch(opts: { limit?: number; deadlineMs?: number }
           html: renderHtml(c.html, person, o),
           text: renderText(c.html, c.plain, person, o),
           unsub: unsubscribeUrl(o.baseUrl, r.token),
+          configSet: cfg,
         });
+        failStreak = 0;
         await sql`update sends set status = 'sent', ses_message_id = ${id}, sent_at = now(), error = null where id = ${r.id}`;
         sent++;
       } catch (e: any) {
@@ -182,8 +220,17 @@ export async function processBatch(opts: { limit?: number; deadlineMs?: number }
           await sql`update sends set status = 'queued', claimed_at = null where id = ${r.id}`;
           await sleep(1000);
         } else {
-          await sql`update sends set status = 'failed', error = ${String(e?.message || e).slice(0, 500)} where id = ${r.id}`;
+          const msg = String(e?.message || e).slice(0, 500);
+          await sql`update sends set status = 'failed', error = ${msg} where id = ${r.id}`;
           failed++;
+          failStreak++;
+          // Amazon paused the whole account, or something is clearly wrong: stop instead of failing every row.
+          if (/SendingPaused|AccountSuspended|AccountSendingPaused/i.test(String(e?.name) + msg)) {
+            await sql`update campaigns set paused_reason = ${"Amazon SES paused sending for the account: " + msg} where status = 'sending' and paused_reason is null`;
+            i = rows.length;
+          } else if (failStreak >= 10) {
+            await sql`update campaigns set paused_reason = ${"10 emails in a row failed. Last error: " + msg} where id = ${r.campaign_id} and paused_reason is null`;
+          }
         }
       }
       const wait = gap * 4 - (Date.now() - started); // 4 workers share the rate
@@ -197,8 +244,38 @@ export async function processBatch(opts: { limit?: number; deadlineMs?: number }
     update campaigns c set status = 'sent', finished_at = now(), updated_at = now()
     where c.status = 'sending' and c.id = any(${[...campaigns.keys()]})
       and not exists (select 1 from sends s where s.campaign_id = c.id and s.status in ('queued','sending'))`;
-  const [{ n }] = await sql`select count(*)::int as n from sends where status in ('queued','sending')`;
-  return { sent, failed, remaining: n };
+  // Anything claimed but not sent because its campaign was paused mid-batch goes back in the queue.
+  await sql`update sends set status = 'queued', claimed_at = null where status = 'sending' and campaign_id in (select id from campaigns where paused_reason is not null)`;
+  await checkSafety();
+  return { sent, failed, remaining: await remaining() };
+}
+
+async function remaining() {
+  const [{ n }] = await db()`select count(*)::int as n from sends s join campaigns c on c.id = s.campaign_id
+    where s.status in ('queued','sending') and c.paused_reason is null`;
+  return n as number;
+}
+
+/**
+ * The circuit breaker. Pauses a sending campaign when Amazon reports too many bounces or complaints,
+ * well before the levels where Gmail, Yahoo or Amazon would act (bounces 5%, complaints 0.1%).
+ */
+export async function checkSafety() {
+  const sql = db();
+  const rows = await sql`
+    select c.id,
+      count(*) filter (where s.status in ('sent','bounced','complained'))::int as sent,
+      count(*) filter (where s.status = 'bounced')::int as bounced,
+      count(*) filter (where s.status = 'complained')::int as complained
+    from campaigns c join sends s on s.campaign_id = c.id
+    where c.status = 'sending' and c.paused_reason is null and (c.resumed_at is null or s.sent_at > c.resumed_at)
+    group by c.id`;
+  for (const r of rows) {
+    let reason = "";
+    if (r.sent >= 40 && r.bounced / r.sent > 0.05) reason = `${r.bounced} of ${r.sent} emails bounced (over 5%). The list may have old or mistyped addresses.`;
+    else if (r.complained >= 2 && r.complained / r.sent > 0.001) reason = `${r.complained} people marked it as spam out of ${r.sent} sent (over 0.1%).`;
+    if (reason) await sql`update campaigns set paused_reason = ${"Paused automatically: " + reason} where id = ${r.id} and paused_reason is null`;
+  }
 }
 
 /** Starts any scheduled campaign whose time has come. */
@@ -239,6 +316,7 @@ export async function sendTest(campaignId: number, to: string[], sampleContactId
       subject: "[Test] " + renderSubject(c.subject || c.name, person),
       html: renderHtml(c.html, person, o),
       text: renderText(c.html, c.plain, person, o),
+      configSet: await configSet(),
     });
   }
 }

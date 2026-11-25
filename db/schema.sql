@@ -178,6 +178,11 @@ CREATE TABLE IF NOT EXISTS images (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
+-- Safe sending: a campaign the safety checks paused (high bounces or complaints) keeps its queue until resumed.
+ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS paused_reason text;
+-- After a person resumes, the safety check only judges emails sent since then.
+ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS resumed_at timestamptz;
+
 INSERT INTO senders (name, email, reply_to, is_default) VALUES
   ('Darkhorse Tech', 'admin@darkhorsetech.com', 'admin@darkhorsetech.com', true),
   ('Darkhorse Tech', 'sales@darkhorsetech.com', 'sales@darkhorsetech.com', false)
@@ -186,5 +191,8 @@ ON CONFLICT (email) DO NOTHING;
 INSERT INTO settings (key, value) VALUES
   ('company',  '"Darkhorse Tech"'),
   ('footer_address', '"3300 Vickery Rd, Syracuse, NY 13212"'),
-  ('default_reminder', '"You’re receiving this email because you opted in to receiving our emails."')
+  ('default_reminder', '"You’re receiving this email because you opted in to receiving our emails."'),
+  ('max_per_campaign', '3000'),
+  ('max_per_day', '4000'),
+  ('send_rate', '5')
 ON CONFLICT (key) DO NOTHING;

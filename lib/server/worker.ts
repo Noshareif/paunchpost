@@ -1,6 +1,7 @@
 import { after } from "next/server";
 import { baseUrl, processBatch, startDueCampaigns } from "./send";
 import { secret as getSecret } from "./secrets";
+import { ensureSchema } from "./setup";
 
 export function authorized(req: Request): boolean {
   const secret = getSecret("CRON_SECRET");
@@ -24,6 +25,7 @@ export function kickWorker() {
 
 /** One unit of work: start due scheduled campaigns, send a batch, chain if more is waiting. */
 export async function tick() {
+  await ensureSchema();
   const started = await startDueCampaigns();
   const r = await processBatch({ limit: 250, deadlineMs: 40_000 });
   if (r.remaining > 0) kickWorker();

@@ -3,6 +3,10 @@ import { db, getSetting } from "./db";
 import { countRecipients, type Audience, type Cond } from "./audience";
 import { startCampaign, sendTest, SendError } from "./send";
 import { kickWorker } from "./worker";
+import { ensureSchema } from "./setup";
+import { connectFeed as connectFeedAws, feedStatus } from "./feed";
+import { spamCheck as lint } from "./spamcheck";
+import { baseUrl, readiness } from "./send";
 
 const sql = () => db();
 type Row = Record<string, any>;
@@ -19,7 +23,7 @@ const num = (v: unknown) => {
 };
 
 /* ---------------- settings ---------------- */
-const SETTING_KEYS = ["company", "footer_address", "default_reminder", "track_opens", "track_clicks", "require_permission", "custom_fields"] as const;
+const SETTING_KEYS = ["company", "footer_address", "default_reminder", "track_opens", "track_clicks", "require_permission", "custom_fields", "max_per_campaign", "max_per_day", "send_rate"] as const;
 
 async function settings() {
   const rows = await sql()`select key, value from settings`;
@@ -32,6 +36,9 @@ async function settings() {
     trackClicks: m.track_clicks ?? true,
     requirePermission: m.require_permission ?? true,
     fields: Array.isArray(m.custom_fields) ? m.custom_fields : [],
+    maxPerCampaign: Number(m.max_per_campaign ?? 3000),
+    maxPerDay: Number(m.max_per_day ?? 4000),
+    sendRate: Number(m.send_rate ?? 5),
   };
 }
 
@@ -65,6 +72,7 @@ function campaignOut(c: Row) {
     senderId: c.sender_id,
     audience: c.audience || {},
     audienceLabel: c.imported_audience || null,
+    pausedReason: c.paused_reason || null,
     templateId: c.template_id,
     trackOpens: c.track_opens,
     trackClicks: c.track_clicks,
@@ -79,7 +87,7 @@ function campaignOut(c: Row) {
 
 const CAMPAIGN_COLS = (s: ReturnType<typeof sql>) => s`
   c.id, c.name, c.subject, c.preview, c.status, c.sender_id, c.audience, c.template_id, c.track_opens, c.track_clicks,
-  c.send_at, c.updated_at, c.created_at, c.imported, c.imported_stats - 'series' - 'links' as imported_stats, c.imported_audience, c.plain,
+  c.send_at, c.updated_at, c.created_at, c.imported, c.imported_stats - 'series' - 'links' as imported_stats, c.imported_audience, c.plain, c.paused_reason,
   coalesce(st.recipients, 0) as s_recipients, coalesce(st.delivered, 0) as s_delivered, coalesce(st.bounces, 0) as s_bounces,
   coalesce(st.opens, 0) as s_opens, coalesce(st.total_opens, 0) as s_total_opens, coalesce(st.clicks, 0) as s_clicks,
   coalesce(st.total_clicks, 0) as s_total_clicks, coalesce(st.unsubs, 0) as s_unsubs, coalesce(st.complaints, 0) as s_complaints,
@@ -100,6 +108,7 @@ const STATS_JOIN = (s: ReturnType<typeof sql>) => s`
 
 /* ---------------- state ---------------- */
 export async function getState() {
+  await ensureSchema();
   const s = sql();
   const [st, senders, lists, tags, segments, templates, campaigns, suppression, imports, images, totals] = await Promise.all([
     settings(),
@@ -625,11 +634,19 @@ async function deleteSender({ id }: Row) {
 
 /* ---------------- settings, images ---------------- */
 async function saveSettings({ patch }: Row) {
-  const map: Row = { company: "company", footerAddress: "footer_address", reminder: "default_reminder", trackOpens: "track_opens", trackClicks: "track_clicks", requirePermission: "require_permission", fields: "custom_fields" };
+  const map: Row = { company: "company", footerAddress: "footer_address", reminder: "default_reminder", trackOpens: "track_opens", trackClicks: "track_clicks", requirePermission: "require_permission", fields: "custom_fields", maxPerCampaign: "max_per_campaign", maxPerDay: "max_per_day", sendRate: "send_rate" };
   for (const [k, v] of Object.entries(patch || {})) {
     const key = map[k];
     if (!key || !(SETTING_KEYS as readonly string[]).includes(key)) continue;
     if (key === "footer_address" && !String(v).trim()) fail("A mailing address is required by law in every marketing email.");
+    if (key === "max_per_campaign" || key === "max_per_day") {
+      const n = Number(v);
+      if (!Number.isInteger(n) || n < 1 || n > 50000) fail("Limits must be whole numbers between 1 and 50,000.");
+    }
+    if (key === "send_rate") {
+      const n = Number(v);
+      if (!(n >= 1 && n <= 13)) fail("Sending speed must be between 1 and 13 emails per second (Amazon’s limit is 14).");
+    }
     await sql()`insert into settings (key, value) values (${key}, ${sql().json(v as any)}) on conflict (key) do update set value = excluded.value`;
   }
   return { ok: true };
@@ -652,7 +669,54 @@ async function deleteImage({ id }: Row) {
   return { ok: true };
 }
 
+async function deliverability() {
+  const st = await settings();
+  const feed = await feedStatus();
+  return { feed, linkHost: new URL(baseUrl()).host, limits: { maxPerCampaign: st.maxPerCampaign, maxPerDay: st.maxPerDay, sendRate: st.sendRate } };
+}
+async function connectFeed() {
+  try {
+    await connectFeedAws();
+  } catch (e) {
+    const m = (e as Error).message || String(e);
+    if (/not authorized|AccessDenied/i.test(m)) fail("Amazon refused: the app’s AWS key isn’t allowed to set this up. " + m);
+    if (/security token|InvalidClientTokenId|credential/i.test(m)) fail("The AWS access key in Vercel isn’t working: " + m);
+    fail("Couldn’t set up the feed: " + m);
+  }
+  // Amazon confirms the subscription within a few seconds by calling PaunchPost back.
+  for (let i = 0; i < 8; i++) {
+    const f = await feedStatus();
+    if (f.state === "on") break;
+    await new Promise(r => setTimeout(r, 1000));
+  }
+  return deliverability();
+}
+async function resumeCampaign({ id }: Row) {
+  const r = await sql()`update campaigns set paused_reason = null, resumed_at = now(), updated_at = now() where id = ${num(id)} and status = 'sending' and paused_reason is not null returning id`;
+  if (!r.length) fail("That campaign isn’t paused.");
+  kickWorker();
+  return { ok: true };
+}
+async function stopCampaign({ id }: Row) {
+  const cid = num(id);
+  const s = sql();
+  await s`update sends set status = 'skipped', error = 'Stopped before sending', claimed_at = null where campaign_id = ${cid} and status = 'queued'`;
+  await s`update campaigns set paused_reason = null, status = 'sent', finished_at = now(), updated_at = now() where id = ${cid} and status = 'sending'`;
+  return { ok: true };
+}
+async function spamCheck({ id }: Row) {
+  const [c] = await sql()`select subject, preview, html from campaigns where id = ${num(id)}`;
+  if (!c) fail("Campaign not found.");
+  const problems = await readiness(num(id));
+  return { problems, warnings: lint(c as any, { linkHost: new URL(baseUrl()).host }) };
+}
+
 export const ACTIONS: Record<string, (args: Row) => Promise<unknown>> = {
+  deliverability,
+  connectFeed,
+  resumeCampaign,
+  stopCampaign,
+  spamCheck,
   getCampaign, createCampaign, updateCampaign, deleteCampaigns, unschedule, countAudience, send, test, report,
   createList, updateList, deleteList,
   contacts, exportContacts, getContact, saveContact, bulkContacts, importContacts,

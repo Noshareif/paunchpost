@@ -10,6 +10,13 @@ export async function migrate() {
   await db().unsafe(schema);
 }
 
+let ensured: Promise<void> | null = null;
+/** Runs the (idempotent) schema once per server process, so new columns appear after a deploy. */
+export function ensureSchema() {
+  if (!ensured) ensured = migrate().catch(e => { ensured = null; throw e; });
+  return ensured;
+}
+
 /** Loads the Mailchimp history (campaigns + templates). Safe to re-run: matched by Mailchimp ID. */
 export async function importMailchimp() {
   const sql = db();

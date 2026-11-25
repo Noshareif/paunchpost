@@ -1,6 +1,8 @@
 import crypto from "node:crypto";
 import { handleSesEvent } from "@/lib/server/ses-events";
 import { secret } from "@/lib/server/secrets";
+import { getSetting } from "@/lib/server/db";
+import { markFeed } from "@/lib/server/feed";
 
 export const dynamic = "force-dynamic";
 
@@ -46,12 +48,16 @@ export async function POST(req: Request) {
   } catch {
     return new Response("Bad request", { status: 400 });
   }
-  if (process.env.SES_SNS_TOPIC_ARN && m.TopicArn !== process.env.SES_SNS_TOPIC_ARN) return new Response("Wrong topic", { status: 403 });
+  const topic = process.env.SES_SNS_TOPIC_ARN || String(await getSetting("sns_topic_arn", ""));
+  if (topic && m.TopicArn !== topic) return new Response("Wrong topic", { status: 403 });
   if (!(await verifySns(m))) return new Response("Bad signature", { status: 403 });
 
   if (m.Type === "SubscriptionConfirmation") {
     const u = new URL(m.SubscribeURL);
-    if (u.protocol === "https:" && /^sns\.[a-z0-9-]+\.amazonaws\.com$/.test(u.hostname)) await fetch(u);
+    if (u.protocol === "https:" && /^sns\.[a-z0-9-]+\.amazonaws\.com$/.test(u.hostname)) {
+      const r = await fetch(u);
+      if (r.ok) await markFeed("confirmed");
+    }
     return new Response("Confirmed");
   }
   if (m.Type !== "Notification") return new Response("Ignored");
@@ -63,5 +69,6 @@ export async function POST(req: Request) {
     return new Response("Ignored");
   }
   await handleSesEvent(ev);
+  await markFeed("event");
   return new Response("OK");
 }
